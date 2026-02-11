@@ -39,11 +39,11 @@ DEFAULTS = {
         "host": "http://localhost:11434",
     },
     "output": {
-        "dir": "~/Workspace/RAG/drafts",
+        "dir": "./output",
         "prefix": "voice",
     },
     "watch": {
-        "dir": "~/Workspace/inbox",
+        "dir": "./watch",
         "extensions": [".wav", ".m4a", ".mp3", ".flac"],
         "processed_log": "~/.voice-to-rag/processed.json",
     },

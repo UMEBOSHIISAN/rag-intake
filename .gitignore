@@ -13,3 +13,5 @@ config.yml
 *.m4a
 *.mp3
 *.flac
+.pytest_cache/
+output/

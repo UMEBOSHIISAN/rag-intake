@@ -64,9 +64,9 @@ python3 ingest.py --list
 | whisper.model | base | Whisper モデルサイズ (tiny/base/small/medium/large) |
 | whisper.language | ja | 文字起こし言語 |
 | ollama.model | gemma3 | 要約に使う LLM モデル |
-| output.dir | ~/Workspace/RAG/drafts | Markdown 出力先 |
+| output.dir | ./output | Markdown 出力先 |
 | output.prefix | voice | ファイル名プレフィックス |
-| watch.dir | ~/Workspace/inbox | 監視ディレクトリ |
+| watch.dir | ./watch | 監視ディレクトリ |
 
 ## Ollama フォールバック
 
