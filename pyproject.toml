@@ -3,34 +3,37 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
-name = "voice-to-rag"
-version = "0.1.0"
-description = "音声メモ → RAG 自動取り込みパイプライン（faster-whisper + Ollama、ローカル完結）"
+name = "rag-intake"
+version = "0.2.0"
+description = "汎用 RAG 取り込みパイプライン（音声・テキスト・PDF・URL → Markdown、ローカル完結）"
 license = "MIT"
 requires-python = ">=3.9"
 readme = "README.md"
 authors = [
     { name = "UMEBOSHIISAN" },
 ]
-keywords = ["whisper", "ollama", "rag", "voice-memo", "transcription"]
+keywords = ["whisper", "ollama", "rag", "voice-memo", "transcription", "pdf", "web-clip"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Text Processing",
 ]
 dependencies = [
     "faster-whisper",
     "ollama",
     "pyyaml",
+    "pymupdf",
+    "trafilatura",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest"]
 
 [project.urls]
-Homepage = "https://github.com/UMEBOSHIISAN/voice-to-rag"
-Repository = "https://github.com/UMEBOSHIISAN/voice-to-rag"
+Homepage = "https://github.com/UMEBOSHIISAN/rag-intake"
+Repository = "https://github.com/UMEBOSHIISAN/rag-intake"
 
 [project.scripts]
-voice-to-rag = "ingest:main"
+rag-intake = "ingest:main"

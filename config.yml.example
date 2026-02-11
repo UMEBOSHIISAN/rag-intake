@@ -10,9 +10,18 @@ ollama:
 
 output:
   dir: "./output"                   # 出力先（お好みで変更）
-  prefix: "voice"                   # ファイル名プレフィックス
+  prefix: "voice"                   # ファイル名プレフィックス（音声用デフォルト）
+
+text:
+  extensions: [".txt", ".md"]       # テキストとして扱う拡張子
+
+pdf:
+  max_pages: 50                     # 抽出する最大ページ数
+
+clip:
+  timeout: 30                       # URL フェッチのタイムアウト（秒）
 
 watch:
   dir: "./watch"                    # 監視ディレクトリ（お好みで変更）
-  extensions: [".wav", ".m4a", ".mp3", ".flac"]
-  processed_log: "~/.voice-to-rag/processed.json"
+  extensions: [".wav", ".m4a", ".mp3", ".flac", ".txt", ".md", ".pdf"]
+  processed_log: "~/.rag-intake/processed.json"

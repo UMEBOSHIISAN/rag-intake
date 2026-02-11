@@ -1,4 +1,6 @@
 faster-whisper
 ollama
 pyyaml
+pymupdf
+trafilatura
 pytest

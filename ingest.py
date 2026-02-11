@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""voice-to-rag: 音声メモ → RAG 自動取り込みパイプライン"""
+"""rag-intake: 汎用 RAG 取り込みパイプライン（音声・テキスト・PDF・URL → Markdown）"""
 
 from __future__ import annotations
 
@@ -42,14 +42,25 @@ DEFAULTS = {
         "dir": "./output",
         "prefix": "voice",
     },
+    "text": {
+        "extensions": [".txt", ".md"],
+    },
+    "pdf": {
+        "max_pages": 50,
+    },
+    "clip": {
+        "timeout": 30,
+    },
     "watch": {
         "dir": "./watch",
-        "extensions": [".wav", ".m4a", ".mp3", ".flac"],
-        "processed_log": "~/.voice-to-rag/processed.json",
+        "extensions": [".wav", ".m4a", ".mp3", ".flac", ".txt", ".md", ".pdf"],
+        "processed_log": "~/.rag-intake/processed.json",
     },
 }
 
 AUDIO_EXTENSIONS = {".wav", ".m4a", ".mp3", ".flac"}
+TEXT_EXTENSIONS = {".txt", ".md"}
+PDF_EXTENSIONS = {".pdf"}
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +104,25 @@ def get(cfg: dict, section: str, key: str, default=None):
 
 
 # ---------------------------------------------------------------------------
-# 文字起こし（faster-whisper）
+# ソースタイプ判定
+# ---------------------------------------------------------------------------
+def detect_source_type(source: str) -> str:
+    """入力ソースのタイプを判定して返す: 'audio' / 'text' / 'pdf' / 'url'"""
+    if source.startswith("http://") or source.startswith("https://"):
+        return "url"
+    p = Path(source)
+    ext = p.suffix.lower()
+    if ext in AUDIO_EXTENSIONS:
+        return "audio"
+    if ext in TEXT_EXTENSIONS:
+        return "text"
+    if ext in PDF_EXTENSIONS:
+        return "pdf"
+    raise ValueError(f"非対応の入力ソースです: {source}")
+
+
+# ---------------------------------------------------------------------------
+# テキスト抽出（タイプ別）
 # ---------------------------------------------------------------------------
 def transcribe(audio_path: Path, cfg: dict) -> str:
     """音声ファイルを faster-whisper で文字起こし"""
@@ -121,11 +150,83 @@ def transcribe(audio_path: Path, cfg: dict) -> str:
     return result
 
 
+def extract_textfile(path: Path, cfg: dict) -> str:
+    """テキストファイル (.txt/.md) を読み込んで返す"""
+    logger.info("テキスト読み込み: %s", path.name)
+    return path.read_text(encoding="utf-8").strip()
+
+
+def extract_pdf(path: Path, cfg: dict) -> str:
+    """PDF ファイルからテキストを抽出（pymupdf 使用）"""
+    import pymupdf
+
+    max_pages = get(cfg, "pdf", "max_pages", 50)
+
+    logger.info("PDF テキスト抽出: %s (最大 %d ページ)", path.name, max_pages)
+    doc = pymupdf.open(str(path))
+    text_parts = []
+    for i, page in enumerate(doc):
+        if i >= max_pages:
+            logger.warning("最大ページ数 (%d) に達したため中断", max_pages)
+            break
+        text_parts.append(page.get_text())
+    doc.close()
+
+    result = "\n".join(text_parts).strip()
+    logger.info("PDF 抽出完了: %d ページ, テキスト長=%d", min(len(doc), max_pages), len(result))
+    return result
+
+
+def extract_url(url: str, cfg: dict) -> str:
+    """URL から本文を抽出（trafilatura 使用）"""
+    import trafilatura
+
+    timeout = get(cfg, "clip", "timeout", 30)
+
+    logger.info("Web ページ取得: %s", url)
+    downloaded = trafilatura.fetch_url(url)
+    if not downloaded:
+        raise RuntimeError(f"URL の取得に失敗しました: {url}")
+
+    text = trafilatura.extract(downloaded)
+    if not text:
+        raise RuntimeError(f"本文の抽出に失敗しました: {url}")
+
+    logger.info("Web 本文抽出完了: テキスト長=%d", len(text))
+    return text
+
+
+def extract_text(source: str, cfg: dict) -> tuple[str, str]:
+    """入力ソースからテキストを抽出。(text, source_type) を返す"""
+    source_type = detect_source_type(source)
+
+    if source_type == "audio":
+        path = Path(source)
+        return transcribe(path, cfg), "audio"
+    elif source_type == "text":
+        path = Path(source)
+        return extract_textfile(path, cfg), "text"
+    elif source_type == "pdf":
+        path = Path(source)
+        return extract_pdf(path, cfg), "pdf"
+    elif source_type == "url":
+        return extract_url(source, cfg), "url"
+    else:
+        raise ValueError(f"非対応のソースタイプ: {source_type}")
+
+
 # ---------------------------------------------------------------------------
 # 要約・整形（Ollama）
 # ---------------------------------------------------------------------------
-SUMMARIZE_PROMPT = """\
-以下は音声メモの文字起こしテキストです。
+SUMMARIZE_PROMPTS = {
+    "audio": "以下は音声メモの文字起こしテキストです。",
+    "text": "以下はテキストメモです。",
+    "pdf": "以下は PDF ドキュメントから抽出したテキストです。",
+    "url": "以下は Web ページから抽出したテキストです。",
+}
+
+SUMMARIZE_TEMPLATE = """\
+{source_description}
 これを構造化された Markdown ドキュメントに整形してください。
 
 ## 出力フォーマット（厳守）
@@ -149,16 +250,33 @@ SUMMARIZE_PROMPT = """\
 - タイトルは必ず1行目に `# ` で始めてください
 - タイトルはファイル名に使うので、日本語OK・スペースはアンダースコアに置換
 - 内容の追加や創作はしないでください
-
+{extra_instructions}
 ---
 
-文字起こしテキスト:
+テキスト:
 {text}
 """
 
+# 後方互換: 旧テストから参照される場合用
+SUMMARIZE_PROMPT = SUMMARIZE_TEMPLATE
 
-def summarize(text: str, cfg: dict) -> dict | None:
-    """Ollama で文字起こしテキストを要約・整形。失敗時は None を返す"""
+SOURCE_TYPE_PREFIX = {
+    "audio": "voice",
+    "text": "text",
+    "pdf": "pdf",
+    "url": "clip",
+}
+
+FALLBACK_LABELS = {
+    "audio": "音声メモ",
+    "text": "テキストメモ",
+    "pdf": "PDF ドキュメント",
+    "url": "Web クリップ",
+}
+
+
+def summarize(text: str, cfg: dict, source_type: str = "audio", source_url: str | None = None) -> dict | None:
+    """Ollama でテキストを要約・整形。失敗時は None を返す"""
     try:
         from ollama import chat
     except ImportError:
@@ -166,7 +284,17 @@ def summarize(text: str, cfg: dict) -> dict | None:
         return None
 
     model = get(cfg, "ollama", "model", "gemma3")
-    prompt = SUMMARIZE_PROMPT.format(text=text)
+    source_description = SUMMARIZE_PROMPTS.get(source_type, SUMMARIZE_PROMPTS["text"])
+
+    extra_instructions = ""
+    if source_type == "url" and source_url:
+        extra_instructions = f"\n- 出典 URL: {source_url}\n"
+
+    prompt = SUMMARIZE_TEMPLATE.format(
+        source_description=source_description,
+        text=text,
+        extra_instructions=extra_instructions,
+    )
 
     try:
         logger.info("Ollama で要約中 (モデル: %s)...", model)
@@ -209,18 +337,19 @@ def sanitize_title(title: str) -> str:
 # ---------------------------------------------------------------------------
 # 保存
 # ---------------------------------------------------------------------------
-def save_markdown(text: str, summary: dict | None, cfg: dict) -> Path:
+def save_markdown(text: str, summary: dict | None, cfg: dict, source_type: str = "audio") -> Path:
     """Markdown ファイルを出力ディレクトリに保存"""
     output_dir = Path(get(cfg, "output", "dir", "~/Workspace/RAG/drafts")).expanduser()
-    prefix = get(cfg, "output", "prefix", "voice")
+    prefix = SOURCE_TYPE_PREFIX.get(source_type, get(cfg, "output", "prefix", "voice"))
     today = date.today().isoformat()
 
     if summary:
         title = summary["title"]
         body = summary["body"]
     else:
+        label = FALLBACK_LABELS.get(source_type, "メモ")
         title = "memo"
-        body = f"# 音声メモ\n\n## 全文\n\n{text}\n"
+        body = f"# {label}\n\n## 全文\n\n{text}\n"
 
     filename = f"{today}_{prefix}_{title}.md"
     output_path = output_dir / filename
@@ -243,7 +372,7 @@ def save_markdown(text: str, summary: dict | None, cfg: dict) -> Path:
 # ---------------------------------------------------------------------------
 def load_processed_log(cfg: dict) -> dict:
     """処理済みファイルのログを読み込む"""
-    log_path = Path(get(cfg, "watch", "processed_log", "~/.voice-to-rag/processed.json")).expanduser()
+    log_path = Path(get(cfg, "watch", "processed_log", "~/.rag-intake/processed.json")).expanduser()
     if log_path.exists():
         with open(log_path) as f:
             return json.load(f)
@@ -252,7 +381,7 @@ def load_processed_log(cfg: dict) -> dict:
 
 def save_processed_log(log: dict, cfg: dict) -> None:
     """処理済みログを保存"""
-    log_path = Path(get(cfg, "watch", "processed_log", "~/.voice-to-rag/processed.json")).expanduser()
+    log_path = Path(get(cfg, "watch", "processed_log", "~/.rag-intake/processed.json")).expanduser()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "w") as f:
         json.dump(log, f, ensure_ascii=False, indent=2)
@@ -267,48 +396,85 @@ def file_hash(path: Path) -> str:
     return h.hexdigest()
 
 
-def is_processed(audio_path: Path, log: dict) -> bool:
-    """ファイルが処理済みかチェック"""
-    key = str(audio_path.resolve())
+def url_hash(url: str) -> str:
+    """URL 文字列の SHA-256 ハッシュを計算"""
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+
+def is_processed(source: str | Path, log: dict) -> bool:
+    """ソースが処理済みかチェック"""
+    source_str = str(source)
+    if source_str.startswith("http://") or source_str.startswith("https://"):
+        key = source_str
+        return key in log
+    path = Path(source_str).resolve()
+    key = str(path)
     if key not in log:
         return False
-    return log[key]["hash"] == file_hash(audio_path)
+    return log[key]["hash"] == file_hash(path)
 
 
-def mark_processed(audio_path: Path, output_path: Path, log: dict) -> None:
-    """ファイルを処理済みとしてログに記録"""
-    key = str(audio_path.resolve())
-    log[key] = {
-        "hash": file_hash(audio_path),
-        "output": str(output_path),
-        "processed_at": date.today().isoformat(),
-    }
+def mark_processed(source: str | Path, output_path: Path, log: dict) -> None:
+    """ソースを処理済みとしてログに記録"""
+    source_str = str(source)
+    if source_str.startswith("http://") or source_str.startswith("https://"):
+        key = source_str
+        log[key] = {
+            "hash": url_hash(source_str),
+            "output": str(output_path),
+            "processed_at": date.today().isoformat(),
+        }
+    else:
+        path = Path(source_str).resolve()
+        key = str(path)
+        log[key] = {
+            "hash": file_hash(path),
+            "output": str(output_path),
+            "processed_at": date.today().isoformat(),
+        }
 
 
 # ---------------------------------------------------------------------------
-# パイプライン（1ファイル処理）
+# パイプライン（1ソース処理）
 # ---------------------------------------------------------------------------
 def process_file(audio_path: Path, cfg: dict) -> Path | None:
-    """音声ファイル1つを処理して Markdown を生成"""
-    if not audio_path.exists():
-        logger.error("ファイルが見つかりません: %s", audio_path)
+    """後方互換: process_source のラッパー"""
+    return process_source(str(audio_path), cfg)
+
+
+def process_source(source: str, cfg: dict) -> Path | None:
+    """入力ソース1つを処理して Markdown を生成"""
+    source_type = None
+    try:
+        source_type = detect_source_type(source)
+    except ValueError as e:
+        logger.error("%s", e)
         return None
 
-    if audio_path.suffix.lower() not in AUDIO_EXTENSIONS:
-        logger.error("非対応の形式です: %s", audio_path.suffix)
+    # ファイルの場合は存在チェック
+    if source_type != "url":
+        path = Path(source)
+        if not path.exists():
+            logger.error("ファイルが見つかりません: %s", source)
+            return None
+
+    # 1. テキスト抽出
+    try:
+        text, source_type = extract_text(source, cfg)
+    except Exception as e:
+        logger.error("テキスト抽出失敗: %s — %s", source, e)
         return None
 
-    # 1. 文字起こし
-    text = transcribe(audio_path, cfg)
     if not text:
-        logger.warning("文字起こし結果が空です: %s", audio_path.name)
+        logger.warning("抽出結果が空です: %s", source)
         return None
 
-    # 2. 要約・整形（失敗時は None）
-    summary = summarize(text, cfg)
+    # 2. 要約・整形
+    source_url = source if source_type == "url" else None
+    summary = summarize(text, cfg, source_type=source_type, source_url=source_url)
 
     # 3. 保存
-    output_path = save_markdown(text, summary, cfg)
+    output_path = save_markdown(text, summary, cfg, source_type=source_type)
     return output_path
 
 
@@ -316,15 +482,16 @@ def process_file(audio_path: Path, cfg: dict) -> Path | None:
 # watch モード
 # ---------------------------------------------------------------------------
 def watch_directory(cfg: dict) -> None:
-    """ディレクトリを監視して音声ファイルを自動処理"""
+    """ディレクトリを監視してファイルを自動処理"""
     watch_dir = Path(get(cfg, "watch", "dir", "~/Workspace/inbox")).expanduser()
-    extensions = set(get(cfg, "watch", "extensions", [".wav", ".m4a", ".mp3", ".flac"]))
+    extensions = set(get(cfg, "watch", "extensions",
+                        [".wav", ".m4a", ".mp3", ".flac", ".txt", ".md", ".pdf"]))
 
     if not watch_dir.exists():
         logger.error("監視ディレクトリが存在しません: %s", watch_dir)
         sys.exit(1)
 
-    logger.info("監視開始: %s (拡張子: %s)", watch_dir, ", ".join(extensions))
+    logger.info("監視開始: %s (拡張子: %s)", watch_dir, ", ".join(sorted(extensions)))
     logger.info("Ctrl+C で停止")
 
     log = load_processed_log(cfg)
@@ -332,13 +499,13 @@ def watch_directory(cfg: dict) -> None:
     try:
         while True:
             for ext in extensions:
-                for audio_path in watch_dir.glob(f"*{ext}"):
-                    if is_processed(audio_path, log):
+                for file_path in watch_dir.glob(f"*{ext}"):
+                    if is_processed(str(file_path), log):
                         continue
-                    logger.info("新規ファイル検出: %s", audio_path.name)
-                    output_path = process_file(audio_path, cfg)
+                    logger.info("新規ファイル検出: %s", file_path.name)
+                    output_path = process_source(str(file_path), cfg)
                     if output_path:
-                        mark_processed(audio_path, output_path, log)
+                        mark_processed(str(file_path), output_path, log)
                         save_processed_log(log, cfg)
             time.sleep(5)
     except KeyboardInterrupt:
@@ -358,7 +525,12 @@ def list_processed(cfg: dict) -> None:
     print(f"処理済みファイル ({len(log)} 件):")
     print("-" * 60)
     for path, info in sorted(log.items(), key=lambda x: x[1].get("processed_at", "")):
-        print(f"  {info.get('processed_at', '?')}  {Path(path).name}")
+        # URL の場合はそのまま、ファイルの場合はファイル名のみ
+        if path.startswith("http://") or path.startswith("https://"):
+            display = path
+        else:
+            display = Path(path).name
+        print(f"  {info.get('processed_at', '?')}  {display}")
         print(f"    → {info.get('output', '?')}")
 
 
@@ -367,17 +539,17 @@ def list_processed(cfg: dict) -> None:
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="voice-to-rag: 音声メモ → RAG 自動取り込みパイプライン",
+        description="rag-intake: 汎用 RAG 取り込みパイプライン（音声・テキスト・PDF・URL → Markdown）",
     )
     parser.add_argument(
-        "files",
+        "sources",
         nargs="*",
-        help="処理する音声ファイル (.wav/.m4a/.mp3/.flac)",
+        help="処理する入力ソース（音声/テキスト/PDF ファイル、または URL）",
     )
     parser.add_argument(
         "--watch",
         action="store_true",
-        help="inbox 監視モード（音声ファイルを自動検出）",
+        help="監視モード（ファイルを自動検出）",
     )
     parser.add_argument(
         "--watch-dir",
@@ -420,27 +592,32 @@ def main(argv: list[str] | None = None) -> int:
         watch_directory(cfg)
         return 0
 
-    # ファイル指定モード
-    if not args.files:
+    # ソース指定モード
+    if not args.sources:
         parser.print_help()
         return 1
 
     log = load_processed_log(cfg)
     success_count = 0
 
-    for filepath in args.files:
-        audio_path = Path(filepath).resolve()
-        if is_processed(audio_path, log):
-            logger.info("スキップ（処理済み）: %s", audio_path.name)
+    for source in args.sources:
+        # URL はそのまま、ファイルは resolve
+        if source.startswith("http://") or source.startswith("https://"):
+            source_key = source
+        else:
+            source_key = str(Path(source).resolve())
+
+        if is_processed(source_key, log):
+            logger.info("スキップ（処理済み）: %s", source)
             continue
 
-        output_path = process_file(audio_path, cfg)
+        output_path = process_source(source, cfg)
         if output_path:
-            mark_processed(audio_path, output_path, log)
+            mark_processed(source_key, output_path, log)
             success_count += 1
 
     save_processed_log(log, cfg)
-    logger.info("完了: %d/%d ファイル処理", success_count, len(args.files))
+    logger.info("完了: %d/%d ソース処理", success_count, len(args.sources))
     return 0
 
 
