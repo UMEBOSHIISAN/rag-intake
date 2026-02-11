@@ -1,0 +1,15 @@
+.claude/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+config.yml
+.voice-to-rag/
+*.wav
+*.m4a
+*.mp3
+*.flac

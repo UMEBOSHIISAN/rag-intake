@@ -1,0 +1,18 @@
+whisper:
+  model: "base"          # tiny/base/small/medium/large
+  device: "cpu"
+  compute_type: "int8"
+  language: "ja"
+
+ollama:
+  model: "gemma3"
+  host: "http://localhost:11434"
+
+output:
+  dir: "~/Workspace/RAG/drafts"    # 出力先
+  prefix: "voice"                   # ファイル名プレフィックス
+
+watch:
+  dir: "~/Workspace/inbox"          # 監視ディレクトリ
+  extensions: [".wav", ".m4a", ".mp3", ".flac"]
+  processed_log: "~/.voice-to-rag/processed.json"

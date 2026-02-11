@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "voice-to-rag"
+version = "0.1.0"
+description = "音声メモ → RAG 自動取り込みパイプライン（ローカル完結）"
+requires-python = ">=3.10"
+dependencies = [
+    "faster-whisper",
+    "ollama",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+voice-to-rag = "ingest:main"
